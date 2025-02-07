@@ -99,7 +99,7 @@ async function main() {
 
     const botInfo = config.bots[unhealthyUser.pool];
     let mTokenRequest = [];
-    botInfo.mtokens.map((mToken) => {
+    botInfo.mTokens.map((mToken) => {
       mTokenRequest.push({
         target: mToken,
         callData: mTokenInterface.encodeFunctionData("balanceOf", [
@@ -149,9 +149,9 @@ async function main() {
       if (selInd == 0) {
         const detailedInfo = tokenInfos[ii].info[0];
         if (detailedInfo.gt(0)) {
-          if (ii < botInfo.mtokens.length * 2) {
+          if (ii < botInfo.mTokens.length * 2) {
             mInfos.push({
-              mtoken: botInfo.mtokens[Math.floor(ii / 2)],
+              mtoken: botInfo.mTokens[Math.floor(ii / 2)],
               token: tokenInfos[ii + 1].info,
               amount: BigNumber.from(detailedInfo),
             });
