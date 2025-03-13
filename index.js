@@ -138,20 +138,20 @@ async function main() {
 
     let mInfos = [];
     let dInfos = [];
+    let tokensWithUnderlying = [];
     const tokenInfos = tokenRes[1].map((tokenRes, ind) => ({
       info: mTokenInterface.decodeFunctionResult(
         ind % 2 == 0 ? "balanceOf" : "UNDERLYING_ASSET_ADDRESS",
         tokenRes
       ),
     }));
-    for (let ii = 0; ii < tokenInfos.length - 1; ii++) {
+    for (let ii = 0; ii < tokenInfos.length; ii++) {
       const selInd = ii % 2;
       if (selInd == 0) {
         const detailedInfo = tokenInfos[ii].info[0];
         if (detailedInfo.gt(0)) {
           if (ii < botInfo.mTokens.length * 2) {
             mInfos.push({
-              mtoken: botInfo.mTokens[Math.floor(ii / 2)],
               token: tokenInfos[ii + 1].info,
               amount: BigNumber.from(detailedInfo),
             });
@@ -162,6 +162,18 @@ async function main() {
             });
           }
         }
+      } else if (ii < botInfo.mTokens.length * 2) {
+        // prepare array of underlying:mToken pairs
+        const detailedInfo = tokenInfos[ii].info[0].toLowerCase();
+        const selInd = tokensWithUnderlying.findIndex(
+          (tokenItem) => tokenItem.token == detailedInfo
+        );
+        if (selInd < 0) {
+          tokensWithUnderlying.push({
+            token: detailedInfo,
+            mtoken: botInfo.mTokens[Math.floor(ii / 2)],
+          });
+        }
       }
     }
 
@@ -170,40 +182,63 @@ async function main() {
       collateralAsset = mInfos[0].token[0];
       debtAsset = dInfos[0].token[0];
 
-      const collateralContract = new Contract(
-        collateralAsset,
-        MTokenAbi,
-        provider
+      const debtContract = new Contract(debtAsset, MTokenAbi, provider);
+      // get mToken of debtToken
+      const debtMToken = tokensWithUnderlying.find(
+        (uToken) => uToken.token == debtAsset.toLowerCase()
       );
-      const collBal = await collateralContract.balanceOf(mInfos[0].mtoken);
-      const calBal = dInfos[0].amount.mul(1100).div(1e3);
-      const checkedBal = calBal > collBal ? collBal : calBal;
-      const cover = calBal > collBal ? collBal : constants.MaxUint256;
+      if (debtMToken) {
+        // get debtToken's balance in mToken contract
+        const debtBalanceInmToken = await debtContract.balanceOf(
+          debtMToken.mtoken
+        );
+        // multiply 1.1 for gap
+        // const increasedDebtBal = dInfos[0].amount.mul(1100).div(1e3);
+        const increasedDebtBal = dInfos[0].amount
+        // console.log(increasedDebtBal.toString(), debtBalanceInmToken.toString());
+        // if debtToken balance is lt than user's debt, update the amount & cover
+        const checkedBal = increasedDebtBal.gt(debtBalanceInmToken)
+          ? debtBalanceInmToken
+          : increasedDebtBal;
+        const cover = increasedDebtBal.gt(debtBalanceInmToken)
+          ? debtBalanceInmToken
+          : constants.MaxUint256;
 
-      const botContract = new Contract(
-        config.bots[unhealthyUser.pool].bot,
-        LiquidationAbi,
-        provider
-      );
-      const lParam = {
-        collateralAsset,
-        debtAsset,
-        user: unhealthyUser.user,
-        amount: checkedBal,
-        transferAmount: 0,
-        debtToCover: cover,
-      };
-      const sParam = {
-        receiver: liquidator.address,
-        swapRouter: config.contracts.router,
-        path1: [collateralAsset, debtAsset],
-        path2: [debtAsset, config.contracts.wflow],
-      };
-      console.log(lParam, sParam);
+        const botContract = new Contract(
+          config.bots[unhealthyUser.pool].bot,
+          LiquidationAbi,
+          provider
+        );
+        const lParam = {
+          collateralAsset,
+          debtAsset,
+          user: unhealthyUser.user,
+          amount: checkedBal,
+          transferAmount: 0,
+          debtToCover: cover,
+        };
+        const sParam = {
+          receiver: liquidator.address,
+          swapRouter: config.contracts.router,
+          path1: [collateralAsset, debtAsset],
+          path2: [debtAsset, config.contracts.wflow],
+        };
 
-      const tx = await botContract.connect(liquidator).execute(lParam, sParam);
-      await tx.wait();
-      await sleep(3000);
+        console.log(lParam, sParam);
+        try {
+          const tx = await botContract
+            .connect(liquidator)
+            .execute(lParam, sParam);
+          await tx.wait();
+        } catch (err) {
+          console.log(err);
+        }
+
+        await sleep(3000);
+      } else {
+        console.log(debtAsset, collateralAsset, tokensWithUnderlying);
+        console.log("unexpected");
+      }
     }
   }
 }
