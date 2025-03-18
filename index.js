@@ -233,10 +233,11 @@ async function main() {
             .execute(lParam, sParam);
           await tx.wait();
         } catch (err) {
-          console.log(err);
+          const revertReason =  err?.error?.reason || err?.reason || err?.data || err.message;
+          console.error("Transaction reverted:", revertReason);
         }
 
-        await sleep(3000);
+        await sleep(5000);
       } else {
         console.log(debtAsset, collateralAsset, tokensWithUnderlying);
         console.log("unexpected");
