@@ -16,7 +16,8 @@ const { usersQuery } = require("./query.js");
 const config = require("./config.json");
 const PoolAbi = require("./abis/Pool.json");
 const MTokenAbi = require("./abis/MToken.json");
-const OracleAbi = require("./abis/OracleAbi.json");
+const FactoryAbi = require("./abis/Factory.json");
+// const OracleAbi = require("./abis/OracleAbi.json");
 const MulticallAbi = require("./abis/MulticallAbi.json");
 const LiquidationAbi = require("./abis/Liquidation.json");
 
@@ -29,6 +30,12 @@ const mTokenInterface = new utils.Interface(MTokenAbi);
 const multicallContract = new Contract(
   config.contracts.multicall,
   MulticallAbi,
+  provider
+);
+
+const factoryContract = new Contract(
+  config.contracts.factory,
+  FactoryAbi,
   provider
 );
 
@@ -194,50 +201,65 @@ async function main() {
         );
         // multiply 1.1 for gap
         // const increasedDebtBal = dInfos[0].amount.mul(1100).div(1e3);
-        const increasedDebtBal = dInfos[0].amount
+        const increasedDebtBal = dInfos[0].amount;
         // console.log(increasedDebtBal.toString(), debtBalanceInmToken.toString());
         // if debtToken balance is lt than user's debt, update the amount & cover
-        const checkedBal = increasedDebtBal.gt(debtBalanceInmToken)
+        let checkedBal = increasedDebtBal.gt(debtBalanceInmToken)
           ? debtBalanceInmToken
           : increasedDebtBal;
-        const cover = increasedDebtBal.gt(debtBalanceInmToken)
-          ? debtBalanceInmToken
-          : constants.MaxUint256;
 
-        const botContract = new Contract(
-          config.bots[unhealthyUser.pool].bot,
-          LiquidationAbi,
-          provider
-        );
-        const lParam = {
-          collateralAsset,
+        // check with pool's liquidity
+        const poolAddr = await factoryContract.getPair(
           debtAsset,
-          user: unhealthyUser.user,
-          amount: checkedBal,
-          transferAmount: 0,
-          debtToCover: cover,
-        };
-        const sParam = {
-          receiver: liquidator.address,
-          swapRouter: config.contracts.router,
-          path1: [collateralAsset, debtAsset],
-          path2: [debtAsset, config.contracts.wflow],
-        };
+          collateralAsset
+        );
+        if (poolAddr != constants.AddressZero) {
+          const debtBalanceInPool = await debtContract.balanceOf(poolAddr);
+          if (checkedBal.gt(debtBalanceInPool)) {
+            // if balance is bigger than pool's liquidity, then set it 10% of liquidity
+            checkedBal = debtBalanceInPool.div(10);
+          }
+          const cover = increasedDebtBal.gt(checkedBal)
+            ? checkedBal
+            : constants.MaxUint256;
 
-        console.log(lParam, sParam);
-        try {
-          const tx = await botContract
-            .connect(liquidator)
-            .execute(lParam, sParam);
-          await tx.wait();
-        } catch (err) {
-          console.log(err);
+          const botContract = new Contract(
+            config.bots[unhealthyUser.pool].bot,
+            LiquidationAbi,
+            provider
+          );
+          const lParam = {
+            collateralAsset,
+            debtAsset,
+            user: unhealthyUser.user,
+            amount: checkedBal,
+            transferAmount: 0,
+            debtToCover: cover,
+          };
+          const sParam = {
+            receiver: liquidator.address,
+            swapRouter: config.contracts.router,
+            path1: [collateralAsset, debtAsset],
+            path2: [debtAsset, config.contracts.wflow],
+          };
+
+          console.log(lParam, sParam);
+          try {
+            const tx = await botContract
+              .connect(liquidator)
+              .execute(lParam, sParam);
+            await tx.wait();
+          } catch (err) {
+            console.log(err);
+          }
+
+          await sleep(3000);
+        } else {
+          console.log(debtAsset, collateralAsset, tokensWithUnderlying);
+          console.log("unexpected");
         }
-
-        await sleep(3000);
       } else {
-        console.log(debtAsset, collateralAsset, tokensWithUnderlying);
-        console.log("unexpected");
+        console.log("!No pool for swap");
       }
     }
   }
