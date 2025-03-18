@@ -1,23 +1,17 @@
 [
   {
-    "inputs": [
-      {
-        "internalType": "contract IPoolAddressesProvider",
-        "name": "provider",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "_wflow",
-        "type": "address"
-      }
-    ],
+    "inputs": [],
     "stateMutability": "nonpayable",
     "type": "constructor"
   },
   {
     "inputs": [],
-    "name": "InvalidAmount",
+    "name": "InvalidInitialization",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidSwapPath",
     "type": "error"
   },
   {
@@ -27,8 +21,58 @@
   },
   {
     "inputs": [],
+    "name": "NotInitializing",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NotPool",
     "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NotWhitelisted",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "owner",
+        "type": "address"
+      }
+    ],
+    "name": "OwnableInvalidOwner",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "account",
+        "type": "address"
+      }
+    ],
+    "name": "OwnableUnauthorizedAccount",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroAddress",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "version",
+        "type": "uint64"
+      }
+    ],
+    "name": "Initialized",
+    "type": "event"
   },
   {
     "anonymous": false,
@@ -136,7 +180,17 @@
           },
           {
             "internalType": "address",
-            "name": "swapRouter",
+            "name": "routerV2",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "routerV3",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "quoter",
             "type": "address"
           },
           {
@@ -200,6 +254,24 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "contract IPoolAddressesProvider",
+        "name": "_provider",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "_wflow",
+        "type": "address"
+      }
+    ],
+    "name": "initialize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "owner",
     "outputs": [
@@ -223,12 +295,12 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "user",
+        "name": "router",
         "type": "address"
       },
       {
         "internalType": "bool",
-        "name": "flag",
+        "name": "status",
         "type": "bool"
       }
     ],
