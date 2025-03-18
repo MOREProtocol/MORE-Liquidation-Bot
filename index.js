@@ -219,7 +219,9 @@ async function main() {
         };
         const sParam = {
           receiver: liquidator.address,
-          swapRouter: config.contracts.router,
+          routerV2: config.contracts.punch.router,
+          routerV3: config.contracts.trado.router,
+          quoter: config.contracts.trado.quoter,
           path1: [collateralAsset, debtAsset],
           path2: [debtAsset, config.contracts.wflow],
         };
