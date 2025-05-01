@@ -16,7 +16,6 @@ const { usersQuery } = require("./query.js");
 const config = require("./config.json");
 const PoolAbi = require("./abis/Pool.json");
 const MTokenAbi = require("./abis/MToken.json");
-const OracleAbi = require("./abis/OracleAbi.json");
 const MulticallAbi = require("./abis/MulticallAbi.json");
 const LiquidationAbi = require("./abis/Liquidation.json");
 
@@ -41,18 +40,37 @@ const apolloFetcher = async (query) => {
   });
 
   return client.query({
-    query: query,
-    fetchPolicy: "cache-first",
+    query: query.query,
+    variables: query.variables,
   });
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// exports.handler = async (event) => {
 async function main() {
   // 1. fetch users with AccountData
-  const accountsInfo = await apolloFetcher(usersQuery);
-  const { users } = accountsInfo.data;
+  let allUsers = [];
+  let skip = 0;
+  const first = 100;
+  let fetchNext = true;
+
+  while (fetchNext) {
+    const query = {
+      query: usersQuery,
+      variables: { first, skip },
+    };
+    const accountsInfo = await apolloFetcher(query);
+    const fetchedUsers = accountsInfo?.data?.users || [];
+    allUsers = allUsers.concat(fetchedUsers);
+
+    if (fetchedUsers.length < first) {
+      fetchNext = false;
+    } else {
+      skip += first;
+    }
+    console.log(`Fetched ${fetchedUsers.length} users, total: ${allUsers.length}`);
+  }
+  const users = allUsers;
 
   let usersHealthReq = [];
   config.pools.map((pool) => {
@@ -233,7 +251,7 @@ async function main() {
             .execute(lParam, sParam);
           await tx.wait();
         } catch (err) {
-          const revertReason =  err?.error?.reason || err?.reason || err?.data || err.message;
+          const revertReason = err?.error?.reason || err?.reason || err?.data || err.message;
           console.error("Transaction reverted:", revertReason);
         }
 
@@ -246,12 +264,21 @@ async function main() {
   }
 }
 
-main()
-  .catch((error) => {
+exports.handler = async (event) => {
+  console.log("Event received:", event);
+  try {
+    await main()
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ message: "OK" }),
+    };
+  } catch (error) {
     console.error(error);
-    process.exit();
-  })
-  .finally(() => {
-    console.log("finally");
-    process.exit();
-  });
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ message: "Error" }),
+    };
+  }
+};
+
+// handler({ key: "value" }).then(console.log).catch(console.error);

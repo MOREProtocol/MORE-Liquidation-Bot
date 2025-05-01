@@ -1,8 +1,8 @@
 const gql = require("graphql-tag");
 
 const usersQuery = gql`
-  {
-    users {
+  query ($first: Int, $skip: Int) {
+    users(first: $first, skip: $skip, orderBy: id, orderDirection: asc) {
       id
     }
   }
