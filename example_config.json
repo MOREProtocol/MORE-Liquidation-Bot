@@ -1,0 +1,36 @@
+{
+  "bot_token": "bot_token_of_telegram_bot",
+  "alert_chat_id": "-0000000000",
+  "info_chat_id": "-0000000000",
+  "liquidator_key": "private_key_of_liquidator",
+  "subgraph_url": "https://graph.com/subgraphs/name/project/subgraph",
+  "rpc_url": "https://mainnet.evm.nodes.onflow.org",
+  "contracts": {
+    "multicall": "0x0",
+    "wflow": "0x0",
+    "punch": {
+      "router": "0x0"
+    },
+    "trado": {
+      "router": "0x0",
+      "quoter": "0x0"
+    }
+  },
+  "pools": [
+    "0x0",
+    "0x0"
+  ],
+  "bots": {
+    "0x0": {
+      "bot": "0x0",
+      "mTokens": [
+        "0x0",
+        "0x0"
+      ],
+      "dTokens": [
+        "0x0",
+        "0x0"
+      ]
+    }
+  }
+}

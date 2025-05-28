@@ -55,6 +55,7 @@ async function main() {
   const first = 100;
   let fetchNext = true;
 
+  // Fetch users in batches of 100 until all are retrieved from the subgraph
   while (fetchNext) {
     const query = {
       query: usersQuery,
@@ -80,6 +81,7 @@ async function main() {
     returnData: []
   };
 
+  // For each chunk of users, fetch their health data for all pools using multicall (batch on-chain calls)
   for (let i = 0; i < users.length; i += userChunkSize) {
     const userChunk = users.slice(i, i + userChunkSize);
     usersHealthReq = []; // Reset for each chunk
@@ -108,7 +110,7 @@ async function main() {
   }
   const usersHealthRes = [allUsersHealthRes.blockNumber, allUsersHealthRes.returnData];
 
-  // 2. generate unhealthy users
+  // Map multicall results to user/pool/healthFactor objects
   const usersWithHealth = usersHealthRes[1]
     .map((userHealth, ind) => {
       const detailedInfo = poolInterface.decodeFunctionResult(
@@ -125,16 +127,18 @@ async function main() {
       };
     })
 
+  // Filter users whose health factor is below 1 (unhealthy, eligible for liquidation)
   const unhealthyUsers = usersWithHealth.filter(
     (userHealth) =>
       userHealth.healthy.lt(constants.WeiPerEther) && userHealth.healthy.gt(0)
   );
+  // Filter users whose health factor is below 1.05 (for info/alert)
   const wideUnhealthyUsers = usersWithHealth.filter(
     (userHealth) =>
       userHealth.healthy.lt(constants.WeiPerEther.mul(105).div(100)) && userHealth.healthy.gt(0)
   );
 
-  // Only send Telegram notification every day at 12:00 UTC
+  // Only send Telegram notification every day at 12:00 UTC if there are at-risk users
   const now = new Date();
   const currentHour = now.getUTCHours();
   const currentMinute = now.getUTCMinutes();
@@ -148,15 +152,7 @@ async function main() {
     }
   }
 
-  try {
-    const bot = new Telegraf(config.bot_token);
-    await bot.telegram.sendMessage(
-      config.alert_chat_id, `Starting liquidation for user 0xtest. HF: 1.00`);
-  } catch (err) {
-    console.error("Error sending message:", err);
-  }
-
-  // 3. fetch unhealthy users debt info
+  // 3. Fetch unhealthy users debt info and attempt liquidation
   const liquidator = new Wallet(config.liquidator_key, provider);
   for (const unhealthyUser of unhealthyUsers) {
     try {
@@ -172,6 +168,7 @@ async function main() {
 
     const botInfo = config.bots[unhealthyUser.pool];
     let mTokenRequest = [];
+    // Prepare multicall requests for all mTokens and dTokens (to get balances and underlying assets)
     botInfo.mTokens.map((mToken) => {
       mTokenRequest.push({
         target: mToken,
@@ -212,6 +209,7 @@ async function main() {
     let mInfos = [];
     let dInfos = [];
     let tokensWithUnderlying = [];
+    // Parse multicall results to get balances and underlying asset addresses
     const tokenInfos = tokenRes[1].map((tokenRes, ind) => ({
       info: mTokenInterface.decodeFunctionResult(
         ind % 2 == 0 ? "balanceOf" : "UNDERLYING_ASSET_ADDRESS",
@@ -250,26 +248,23 @@ async function main() {
       }
     }
 
-    // console.log(mInfos, dInfos, unhealthyUser.user);
+    // If user has both collateral and debt, proceed to liquidation
     if (mInfos.length > 0 && dInfos.length > 0) {
       collateralAsset = mInfos[0].token[0];
       debtAsset = dInfos[0].token[0];
 
       const debtContract = new Contract(debtAsset, MTokenAbi, provider);
-      // get mToken of debtToken
+      // Find the mToken contract for the debt asset
       const debtMToken = tokensWithUnderlying.find(
         (uToken) => uToken.token == debtAsset.toLowerCase()
       );
       if (debtMToken) {
-        // get debtToken's balance in mToken contract
+        // Get how much debtToken is available in the mToken contract
         const debtBalanceInmToken = await debtContract.balanceOf(
           debtMToken.mtoken
         );
-        // multiply 1.1 for gap
-        // const increasedDebtBal = dInfos[0].amount.mul(1100).div(1e3);
         const increasedDebtBal = dInfos[0].amount
-        // console.log(increasedDebtBal.toString(), debtBalanceInmToken.toString());
-        // if debtToken balance is lt than user's debt, update the amount & cover
+        // If user's debt is more than available, cap it to available
         const checkedBal = increasedDebtBal.gt(debtBalanceInmToken)
           ? debtBalanceInmToken
           : increasedDebtBal;
@@ -277,6 +272,7 @@ async function main() {
           ? debtBalanceInmToken
           : constants.MaxUint256;
 
+        // Prepare liquidation parameters and call the liquidation contract
         const botContract = new Contract(
           config.bots[unhealthyUser.pool].bot,
           LiquidationAbi,
@@ -334,6 +330,7 @@ async function main() {
   }
 }
 
+// Handler for AWS Lambda. Comment out to run locally.
 exports.handler = async (event) => {
   console.log("Event received:", event);
   try {
