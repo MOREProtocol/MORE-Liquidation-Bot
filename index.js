@@ -1,4 +1,5 @@
 const _ = require("lodash");
+const { Telegraf } = require('telegraf');
 const { HttpLink } = require("apollo-link-http");
 const { ApolloClient } = require("apollo-client");
 const { InMemoryCache } = require("apollo-cache-inmemory");
@@ -73,22 +74,42 @@ async function main() {
   const users = allUsers;
 
   let usersHealthReq = [];
-  config.pools.map((pool) => {
-    users.map((user) => {
-      usersHealthReq.push({
-        target: pool,
-        callData: poolInterface.encodeFunctionData("getUserAccountData", [
-          user.id,
-        ]),
+  const userChunkSize = 50;
+  let allUsersHealthRes = {
+    blockNumber: null,
+    returnData: []
+  };
+
+  for (let i = 0; i < users.length; i += userChunkSize) {
+    const userChunk = users.slice(i, i + userChunkSize);
+    usersHealthReq = []; // Reset for each chunk
+
+    config.pools.map((pool) => {
+      userChunk.map((user) => {
+        usersHealthReq.push({
+          target: pool,
+          callData: poolInterface.encodeFunctionData("getUserAccountData", [
+            user.id,
+          ]),
+        });
       });
     });
-  });
-  const usersHealthRes = await multicallContract.callStatic.aggregate(
-    usersHealthReq
-  );
+
+    if (usersHealthReq.length > 0) {
+      const chunkHealthRes = await multicallContract.callStatic.aggregate(
+        usersHealthReq
+      );
+      if (allUsersHealthRes.blockNumber === null) {
+        allUsersHealthRes.blockNumber = chunkHealthRes.blockNumber;
+      }
+      allUsersHealthRes.returnData = allUsersHealthRes.returnData.concat(chunkHealthRes.returnData);
+      console.log(`Processed batch of ${userChunk.length} users for health checks.`);
+    }
+  }
+  const usersHealthRes = [allUsersHealthRes.blockNumber, allUsersHealthRes.returnData];
 
   // 2. generate unhealthy users
-  const unhealthyUsers = usersHealthRes[1]
+  const usersWithHealth = usersHealthRes[1]
     .map((userHealth, ind) => {
       const detailedInfo = poolInterface.decodeFunctionResult(
         "getUserAccountData",
@@ -103,15 +124,49 @@ async function main() {
         healthy: BigNumber.from(detailedInfo.healthFactor),
       };
     })
-    .filter(
-      (userHealth) =>
-        userHealth.healthy.lt(constants.WeiPerEther) && userHealth.healthy.gt(0)
-    );
-  console.log(unhealthyUsers);
+
+  const unhealthyUsers = usersWithHealth.filter(
+    (userHealth) =>
+      userHealth.healthy.lt(constants.WeiPerEther) && userHealth.healthy.gt(0)
+  );
+  const wideUnhealthyUsers = usersWithHealth.filter(
+    (userHealth) =>
+      userHealth.healthy.lt(constants.WeiPerEther.mul(105).div(100)) && userHealth.healthy.gt(0)
+  );
+
+  // Only send Telegram notification every day at 12:00 UTC
+  const now = new Date();
+  const currentHour = now.getUTCHours();
+  const currentMinute = now.getUTCMinutes();
+  if (wideUnhealthyUsers.length > 0 && currentHour === 12 && currentMinute === 0) {
+    try {
+      const bot = new Telegraf(config.bot_token);
+      await bot.telegram.sendMessage(
+        config.info_chat_id, `Unhealthy users: ${wideUnhealthyUsers.map(u => `${u.user} (${(u.healthy.toString() / 1e18).toFixed(2)})`).join(', ')}`);
+    } catch (err) {
+      console.error("Error sending message:", err);
+    }
+  }
+
+  try {
+    const bot = new Telegraf(config.bot_token);
+    await bot.telegram.sendMessage(
+      config.alert_chat_id, `Starting liquidation for user 0xtest. HF: 1.00`);
+  } catch (err) {
+    console.error("Error sending message:", err);
+  }
 
   // 3. fetch unhealthy users debt info
   const liquidator = new Wallet(config.liquidator_key, provider);
   for (const unhealthyUser of unhealthyUsers) {
+    try {
+      const bot = new Telegraf(config.bot_token);
+      await bot.telegram.sendMessage(
+        config.alert_chat_id, `Starting liquidation for user ${unhealthyUser.user}. HF: ${(unhealthyUser.healthy.toString() / 1e18).toFixed(2)}`);
+    } catch (err) {
+      console.error("Error sending message:", err);
+    }
+
     let collateralAsset = "";
     let debtAsset = "";
 
@@ -249,10 +304,25 @@ async function main() {
           const tx = await botContract
             .connect(liquidator)
             .execute(lParam, sParam);
-          await tx.wait();
+          const txReceipt = await tx.wait();
+          console.log('txReceipt', txReceipt);
+          try {
+            const bot = new Telegraf(config.bot_token);
+            await bot.telegram.sendMessage(
+              config.alert_chat_id, `Liquidation for user ${unhealthyUser.user} completed. TxId: ${txReceipt.transactionHash}`);
+          } catch (err) {
+            console.error("Error sending message:", err);
+          }
         } catch (err) {
           const revertReason = err?.error?.reason || err?.reason || err?.data || err.message;
           console.error("Transaction reverted:", revertReason);
+          try {
+            const bot = new Telegraf(config.bot_token);
+            await bot.telegram.sendMessage(
+              config.alert_chat_id, `Liquidation for user ${unhealthyUser.user} failed. Reason: ${revertReason.slice(0, 100)}`);
+          } catch (err) {
+            console.error("Error sending message:", err);
+          }
         }
 
         await sleep(5000);
@@ -281,4 +351,4 @@ exports.handler = async (event) => {
   }
 };
 
-// handler({ key: "value" }).then(console.log).catch(console.error);
+// main()
