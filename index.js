@@ -76,17 +76,15 @@ async function main() {
 
   let usersHealthReq = [];
   const userChunkSize = 50;
-  let allUsersHealthRes = {
-    blockNumber: null,
-    returnData: []
-  };
+  let allUsersHealthRes = []
 
   // For each chunk of users, fetch their health data for all pools using multicall (batch on-chain calls)
-  for (let i = 0; i < users.length; i += userChunkSize) {
-    const userChunk = users.slice(i, i + userChunkSize);
-    usersHealthReq = []; // Reset for each chunk
+  for (let poolInd = 0; poolInd < config.pools.length; poolInd++) {
+    const pool = config.pools[poolInd];
+    for (let i = 0; i < users.length; i += userChunkSize) {
+      const userChunk = users.slice(i, i + userChunkSize);
+      usersHealthReq = []; // Reset for each chunk
 
-    config.pools.map((pool) => {
       userChunk.map((user) => {
         usersHealthReq.push({
           target: pool,
@@ -95,62 +93,81 @@ async function main() {
           ]),
         });
       });
-    });
 
-    if (usersHealthReq.length > 0) {
-      const chunkHealthRes = await multicallContract.callStatic.aggregate(
-        usersHealthReq
-      );
-      if (allUsersHealthRes.blockNumber === null) {
-        allUsersHealthRes.blockNumber = chunkHealthRes.blockNumber;
+      if (usersHealthReq.length > 0) {
+        const chunkHealthRes = await multicallContract.callStatic.aggregate(
+          usersHealthReq
+        );
+
+        const userWithHealth = chunkHealthRes.returnData.map((userHealth, ind) => {
+          const detailedInfo = poolInterface.decodeFunctionResult(
+            "getUserAccountData",
+            userHealth
+          );
+          const userId = users[ind + i].id
+          return {
+            pool: pool,
+            user: userId,
+            healthFactor: BigNumber.from(detailedInfo.healthFactor),
+          }
+        });
+
+        allUsersHealthRes = allUsersHealthRes.concat(userWithHealth);
+        console.log(`Pool ${config.pools[poolInd]}: processed batch of ${userChunk.length} users for health checks.`);
       }
-      allUsersHealthRes.returnData = allUsersHealthRes.returnData.concat(chunkHealthRes.returnData);
-      console.log(`Processed batch of ${userChunk.length} users for health checks.`);
     }
   }
-  const usersHealthRes = [allUsersHealthRes.blockNumber, allUsersHealthRes.returnData];
-
-  // Map multicall results to user/pool/healthFactor objects
-  const usersWithHealth = usersHealthRes[1]
-    .map((userHealth, ind) => {
-      const detailedInfo = poolInterface.decodeFunctionResult(
-        "getUserAccountData",
-        userHealth
-      );
-
-      const userInd = ind % users.length;
-      const poolInd = Math.floor(ind / users.length);
-      return {
-        user: users[userInd].id,
-        pool: config.pools[poolInd],
-        healthy: BigNumber.from(detailedInfo.healthFactor),
-      };
-    })
 
   // Filter users whose health factor is below 1 (unhealthy, eligible for liquidation)
-  const unhealthyUsers = usersWithHealth.filter(
+  const unhealthyUsers = allUsersHealthRes.filter(
     (userHealth) =>
-      userHealth.healthy.lt(constants.WeiPerEther) && userHealth.healthy.gt(0)
+      userHealth.healthFactor.lte(constants.WeiPerEther) && userHealth.healthFactor.gt(0)
   );
-  // Filter users whose health factor is below 1.05 (for info/alert)
-  const wideUnhealthyUsers = usersWithHealth.filter(
+  // Filter users whose health factor is below 1.05 (for info)
+  const wideUnhealthyUsers = allUsersHealthRes.filter(
     (userHealth) =>
-      userHealth.healthy.lt(constants.WeiPerEther.mul(105).div(100)) && userHealth.healthy.gt(0)
+      userHealth.healthFactor.lt(constants.WeiPerEther.mul(105).div(100)) && userHealth.healthFactor.gte(constants.WeiPerEther)
+  ).sort((a, b) => {
+    // Sort by ascending health factor
+    if (a.healthFactor.lt(b.healthFactor)) return -1;
+    if (a.healthFactor.gt(b.healthFactor)) return 1;
+    return 0;
+  });
+  // Filter users whose health factor is 0 (for info)
+  const zeroHealthUsers = allUsersHealthRes.filter(
+    (userHealth) =>
+      userHealth.healthFactor.eq(0)
   );
 
   // Only send Telegram notification every day at 12:00 UTC if there are at-risk users
   const now = new Date();
   const currentHour = now.getUTCHours();
   const currentMinute = now.getUTCMinutes();
-  if (wideUnhealthyUsers.length > 0 && currentHour === 12 && currentMinute === 0) {
-    try {
-      const bot = new Telegraf(config.bot_token);
-      await bot.telegram.sendMessage(
-        config.info_chat_id, `Unhealthy users: ${wideUnhealthyUsers.map(u => `${u.user} (${(u.healthy.toString() / 1e18).toFixed(2)})`).join(', ')}`);
-    } catch (err) {
-      console.error("Error sending message:", err);
+  if (currentHour === 12 && currentMinute === 0) {
+    if (wideUnhealthyUsers.length > 0) {
+      try {
+        const bot = new Telegraf(config.bot_token);
+        await bot.telegram.sendMessage(
+          config.info_chat_id, `Unhealthy users: ${wideUnhealthyUsers.map(u => `${u.user} (${(u.healthFactor.toString() / 1e18).toFixed(2)})`).join(', ')}`);
+      } catch (err) {
+        console.error("Error sending message:", err);
+      }
+    }
+    if (zeroHealthUsers.length > 0) {
+      try {
+        const bot = new Telegraf(config.bot_token);
+        await bot.telegram.sendMessage(
+          config.info_chat_id, `Zero HF users: ${zeroHealthUsers.map(u => `${u.user}`).join(', ')}`);
+      } catch (err) {
+        console.error("Error sending message:", err);
+      }
     }
   }
+
+  // For debugging
+  // console.log('unhealthyUsers', unhealthyUsers);
+  // console.log('wideUnhealthyUsers', wideUnhealthyUsers);
+  // console.log('zeroHealthUsers', zeroHealthUsers);
 
   // 3. Fetch unhealthy users debt info and attempt liquidation
   const liquidator = new Wallet(config.liquidator_key, provider);
@@ -158,7 +175,7 @@ async function main() {
     try {
       const bot = new Telegraf(config.bot_token);
       await bot.telegram.sendMessage(
-        config.alert_chat_id, `Starting liquidation for user ${unhealthyUser.user}. HF: ${(unhealthyUser.healthy.toString() / 1e18).toFixed(2)}`);
+        config.alert_chat_id, `Starting liquidation for user ${unhealthyUser.user}. HF: ${(unhealthyUser.healthFactor.toString() / 1e18).toFixed(2)}`);
     } catch (err) {
       console.error("Error sending message:", err);
     }
@@ -325,6 +342,17 @@ async function main() {
       } else {
         console.log(debtAsset, collateralAsset, tokensWithUnderlying);
         console.log("unexpected");
+      }
+    } else {
+      console.log('No collateral or debt for user', unhealthyUser.user);
+      console.log('mInfos', mInfos);
+      console.log('dInfos', dInfos);
+      try {
+        const bot = new Telegraf(config.bot_token);
+        await bot.telegram.sendMessage(
+          config.alert_chat_id, `No collateral or debt for user ${unhealthyUser.user}. HF: ${(unhealthyUser.healthFactor.toString() / 1e18).toFixed(2)}`);
+      } catch (err) {
+        console.error("Error sending message:", err);
       }
     }
   }
