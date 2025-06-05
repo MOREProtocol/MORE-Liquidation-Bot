@@ -107,6 +107,7 @@ async function main() {
           const userId = users[ind + i].id
           return {
             pool: pool,
+            block: chunkHealthRes.blockNumber,
             user: userId,
             healthFactor: BigNumber.from(detailedInfo.healthFactor),
           }
@@ -175,7 +176,7 @@ async function main() {
     try {
       const bot = new Telegraf(config.bot_token);
       await bot.telegram.sendMessage(
-        config.alert_chat_id, `Starting liquidation for user ${unhealthyUser.user}. HF: ${(unhealthyUser.healthFactor.toString() / 1e18).toFixed(2)}`);
+        config.alert_chat_id, `Starting liquidation for user ${unhealthyUser.user}. HF: ${(unhealthyUser.healthFactor.toString() / 1e18).toFixed(2)}. Block: ${unhealthyUser.block.toString()}`);
     } catch (err) {
       console.error("Error sending message:", err);
     }
