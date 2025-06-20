@@ -13,6 +13,7 @@ const {
 } = require("ethers");
 
 const { usersQuery } = require("./query.js");
+const { RouterQuoteManager } = require("./router-quotes.js");
 
 const config = require("./config.json");
 const PoolAbi = require("./abis/Pool.json");
@@ -144,42 +145,46 @@ async function main() {
   const now = new Date();
   const currentHour = now.getUTCHours();
   const currentMinute = now.getUTCMinutes();
-  if (currentHour === 12 && currentMinute === 0) {
-    if (wideUnhealthyUsers.length > 0) {
-      try {
-        const bot = new Telegraf(config.bot_token);
-        await bot.telegram.sendMessage(
-          config.info_chat_id, `Unhealthy users: ${wideUnhealthyUsers.map(u => `${u.user} (${(u.healthFactor.toString() / 1e18).toFixed(2)})`).join(', ')}`);
-      } catch (err) {
-        console.error("Error sending message:", err);
-      }
-    }
-    if (zeroHealthUsers.length > 0) {
-      try {
-        const bot = new Telegraf(config.bot_token);
-        await bot.telegram.sendMessage(
-          config.info_chat_id, `Zero HF users: ${zeroHealthUsers.map(u => `${u.user}`).join(', ')}`);
-      } catch (err) {
-        console.error("Error sending message:", err);
-      }
-    }
-  }
+  // if (currentHour === 12 && currentMinute === 0) {
+  //   if (wideUnhealthyUsers.length > 0) {
+  //     try {
+  //       const bot = new Telegraf(config.bot_token);
+  //       await bot.telegram.sendMessage(
+  //         config.info_chat_id, `Unhealthy users: ${wideUnhealthyUsers.map(u => `${u.user} (${(u.healthFactor.toString() / 1e18).toFixed(2)})`).join(', ')}`);
+  //     } catch (err) {
+  //       console.error("Error sending message:", err);
+  //     }
+  //   }
+  //   if (zeroHealthUsers.length > 0) {
+  //     try {
+  //       const bot = new Telegraf(config.bot_token);
+  //       await bot.telegram.sendMessage(
+  //         config.info_chat_id, `Zero HF users: ${zeroHealthUsers.map(u => `${u.user}`).join(', ')}`);
+  //     } catch (err) {
+  //       console.error("Error sending message:", err);
+  //     }
+  //   }
+  // }
 
   // For debugging
-  // console.log('unhealthyUsers', unhealthyUsers);
-  // console.log('wideUnhealthyUsers', wideUnhealthyUsers);
-  // console.log('zeroHealthUsers', zeroHealthUsers);
+  console.log('unhealthyUsers', unhealthyUsers);
+  console.log('wideUnhealthyUsers', wideUnhealthyUsers);
+  console.log('zeroHealthUsers', zeroHealthUsers);
 
   // 3. Fetch unhealthy users debt info and attempt liquidation
   const liquidator = new Wallet(config.liquidator_key, provider);
-  for (const unhealthyUser of unhealthyUsers) {
-    try {
-      const bot = new Telegraf(config.bot_token);
-      await bot.telegram.sendMessage(
-        config.alert_chat_id, `Starting liquidation for user ${unhealthyUser.user}. HF: ${(unhealthyUser.healthFactor.toString() / 1e18).toFixed(2)}. Block: ${unhealthyUser.block.toString()}`);
-    } catch (err) {
-      console.error("Error sending message:", err);
-    }
+
+  for (const unhealthyUser of wideUnhealthyUsers) {
+    // Get the bot contract address for this specific pool
+    const botContractAddress = config.bots[unhealthyUser.pool].bot;
+    const routerQuoteManager = new RouterQuoteManager(provider, config, liquidator.address, botContractAddress);
+    // try {
+    //   const bot = new Telegraf(config.bot_token);
+    //   await bot.telegram.sendMessage(
+    //     config.alert_chat_id, `Starting liquidation for user ${unhealthyUser.user}. HF: ${(unhealthyUser.healthFactor.toString() / 1e18).toFixed(2)}. Block: ${unhealthyUser.block.toString()}`);
+    // } catch (err) {
+    //   console.error("Error sending message:", err);
+    // }
 
     let collateralAsset = "";
     let debtAsset = "";
@@ -296,6 +301,18 @@ async function main() {
           LiquidationAbi,
           provider
         );
+
+        // Get best quotes for both swaps using the router quote manager
+        console.log(`Getting best swap routes for liquidation...`);
+        console.log(`Collateral: ${collateralAsset}, Debt: ${debtAsset}, Amount: ${checkedBal.toString()}`);
+
+        const swapParams = await routerQuoteManager.getLiquidationSwapParams(
+          collateralAsset,
+          debtAsset,
+          checkedBal,
+          config.contracts.wflow
+        );
+
         const lParam = {
           collateralAsset,
           debtAsset,
@@ -304,39 +321,35 @@ async function main() {
           transferAmount: 0,
           debtToCover: cover,
         };
-        const sParam = {
-          receiver: liquidator.address,
-          routerV2: config.contracts.punch.router,
-          routerV3: config.contracts.trado.router,
-          quoter: config.contracts.trado.quoter,
-          path1: [collateralAsset, debtAsset],
-          path2: [debtAsset, config.contracts.wflow],
-        };
 
-        console.log(lParam, sParam);
+        const sParamsToRepayLoan = swapParams.sParamsToRepayLoan;
+        const sParamsToSendToReceiver = swapParams.sParamsToSendToReceiver;
+        const receiver = liquidator.address;
+
+        console.log(lParam, sParamsToRepayLoan, sParamsToSendToReceiver, receiver);
         try {
-          const tx = await botContract
-            .connect(liquidator)
-            .execute(lParam, sParam);
-          const txReceipt = await tx.wait();
-          console.log('txReceipt', txReceipt);
-          try {
-            const bot = new Telegraf(config.bot_token);
-            await bot.telegram.sendMessage(
-              config.alert_chat_id, `Liquidation for user ${unhealthyUser.user} completed. TxId: ${txReceipt.transactionHash}`);
-          } catch (err) {
-            console.error("Error sending message:", err);
-          }
+          // const tx = await botContract
+          //   .connect(liquidator)
+          //   .execute(lParam, sParamsToRepayLoan, sParamsToSendToReceiver, receiver);
+          // const txReceipt = await tx.wait();
+          // console.log('txReceipt', txReceipt);
+          // try {
+          //   const bot = new Telegraf(config.bot_token);
+          //   await bot.telegram.sendMessage(
+          //     config.alert_chat_id, `Liquidation for user ${unhealthyUser.user} completed. TxId: ${txReceipt.transactionHash}`);
+          // } catch (err) {
+          //   console.error("Error sending message:", err);
+          // }
         } catch (err) {
           const revertReason = err?.error?.reason || err?.reason || err?.data || err.message;
           console.error("Transaction reverted:", revertReason);
-          try {
-            const bot = new Telegraf(config.bot_token);
-            await bot.telegram.sendMessage(
-              config.alert_chat_id, `Liquidation for user ${unhealthyUser.user} failed. Reason: ${revertReason.slice(0, 100)}`);
-          } catch (err) {
-            console.error("Error sending message:", err);
-          }
+          // try {
+          //   const bot = new Telegraf(config.bot_token);
+          //   await bot.telegram.sendMessage(
+          //     config.alert_chat_id, `Liquidation for user ${unhealthyUser.user} failed. Reason: ${revertReason.slice(0, 100)}`);
+          // } catch (err) {
+          //   console.error("Error sending message:", err);
+          // }
         }
 
         await sleep(5000);
@@ -348,33 +361,33 @@ async function main() {
       console.log('No collateral or debt for user', unhealthyUser.user);
       console.log('mInfos', mInfos);
       console.log('dInfos', dInfos);
-      try {
-        const bot = new Telegraf(config.bot_token);
-        await bot.telegram.sendMessage(
-          config.alert_chat_id, `No collateral or debt for user ${unhealthyUser.user}. HF: ${(unhealthyUser.healthFactor.toString() / 1e18).toFixed(2)}`);
-      } catch (err) {
-        console.error("Error sending message:", err);
-      }
+      // try {
+      //   const bot = new Telegraf(config.bot_token);
+      //   await bot.telegram.sendMessage(
+      //     config.alert_chat_id, `No collateral or debt for user ${unhealthyUser.user}. HF: ${(unhealthyUser.healthFactor.toString() / 1e18).toFixed(2)}`);
+      // } catch (err) {
+      //   console.error("Error sending message:", err);
+      // }
     }
   }
 }
 
 // Handler for AWS Lambda. Comment out to run locally.
-exports.handler = async (event) => {
-  console.log("Event received:", event);
-  try {
-    await main()
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ message: "OK" }),
-    };
-  } catch (error) {
-    console.error(error);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ message: "Error" }),
-    };
-  }
-};
+// exports.handler = async (event) => {
+//   console.log("Event received:", event);
+//   try {
+//     await main()
+//     return {
+//       statusCode: 200,
+//       body: JSON.stringify({ message: "OK" }),
+//     };
+//   } catch (error) {
+//     console.error(error);
+//     return {
+//       statusCode: 500,
+//       body: JSON.stringify({ message: "Error" }),
+//     };
+//   }
+// };
 
-// main()
+main()
