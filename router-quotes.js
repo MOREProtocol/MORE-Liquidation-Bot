@@ -163,6 +163,7 @@ class RouterQuoteManager {
  * Get quote from AgroKitty router
  */
   async getAgroKittyQuote(tokenIn, tokenOut, amountIn, adapters = []) {
+    console.log("+++++ ", tokenIn, tokenOut, amountIn.toString())
     try {
       // AgroKitty uses a custom Trade struct for swaps
       const trade = {
@@ -174,7 +175,7 @@ class RouterQuoteManager {
 
       // Method 1: Use findBestPath for accurate quotes without token transfers
       try {
-        const maxSteps = 3; // Reasonable limit for path finding
+        const maxSteps = 4; // Reasonable limit for path finding
         const formattedOffer = await this.agroKittyRouter.findBestPath(
           amountIn,
           tokenIn,
@@ -182,15 +183,19 @@ class RouterQuoteManager {
           maxSteps
         );
 
-        // Use named properties from the struct (more reliable than array indices)
-        const amountOut = formattedOffer.amountOut;
+        // Use the updated FormattedOffer structure: { amounts[], adapters[], path[], gasEstimate }
+        const amounts = formattedOffer.amounts || [];
+        const amountOut = amounts.length > 0 ? amounts[amounts.length - 1] : null; // Last amount is final output
         const bestPath = formattedOffer.path || [tokenIn, tokenOut];
         const bestAdapters = formattedOffer.adapters || [];
+        const gasEstimate = formattedOffer.gasEstimate || 0;
 
         console.log(`  AgroKitty result:`);
-        console.log(`    AmountOut: ${amountOut ? amountOut.toString() : 'null'}`);
+        console.log(`    Amounts array: [${amounts.map(a => a.toString()).join(', ')}]`);
+        console.log(`    Final AmountOut: ${amountOut ? amountOut.toString() : 'null'}`);
         console.log(`    Path: ${bestPath.join(' -> ')}`);
         console.log(`    Adapters: ${bestAdapters.join(', ') || 'None'}`);
+        console.log(`    Gas Estimate: ${gasEstimate.toString()}`);
 
         // Validate the amount - if it's suspiciously small compared to input, it might be an error
         const minExpectedOut = amountIn.div(1000); // At least 0.1% of input seems reasonable
@@ -321,33 +326,64 @@ class RouterQuoteManager {
       console.log(`\n--- Getting quote for debt -> WFLOW (send to receiver) ---`);
       console.log(`Debt amount for receiver swap: ${debtAmountForReceiver.toString()}`);
 
-      const receiverQuote = debtAmountForReceiver.gt(0) ?
-        await this.getBestQuote(debtAsset, wflowAddress, debtAmountForReceiver) : null;
+      let receiverQuote = null;
 
-      if (receiverQuote) {
-        console.log(`Best receiver quote: ${receiverQuote.amountOut.toString()} from router type ${receiverQuote.swapType}`);
-      } else {
-        console.log(`No valid receiver quote found, using default parameters`);
-      }
+      // Check if debt asset is already WFLOW - no swap needed!
+      if (debtAsset.toLowerCase() === wflowAddress.toLowerCase()) {
+        console.log(`✅ Debt asset IS WFLOW - no swap needed for receiver!`);
+        console.log(`   Will directly send ${debtAmountForReceiver.toString()} WFLOW to receiver`);
 
-      const result = {
-        sParamsToRepayLoan: repayQuote || {
-          swapType: SwapType.UNISWAP_V2,
-          router: this.config.contracts.punch.router,
-          path: utils.defaultAbiCoder.encode(["address[]"], [[collateralAsset, debtAsset]]),
-          amountIn: collateralAmount,
-          amountOutMin: 0,
-          adapters: []
-        },
-        sParamsToSendToReceiver: receiverQuote || {
-          swapType: SwapType.UNISWAP_V2,
+        // Create a "dummy" quote that represents no swap (same token in/out)
+        receiverQuote = {
+          swapType: SwapType.UNISWAP_V2, // Default type (won't be used since no swap)
           router: this.config.contracts.punch.router,
           path: utils.defaultAbiCoder.encode(["address[]"], [[debtAsset, wflowAddress]]),
           amountIn: debtAmountForReceiver,
-          amountOutMin: 0,
+          amountOut: debtAmountForReceiver, // 1:1 ratio since same token
+          amountOutMin: debtAmountForReceiver, // No slippage risk
           adapters: []
+        };
+      } else {
+        console.log(`   Debt asset (${debtAsset}) != WFLOW (${wflowAddress}) - getting swap quote`);
+        receiverQuote = debtAmountForReceiver.gt(0) ?
+          await this.getBestQuote(debtAsset, wflowAddress, debtAmountForReceiver) : null;
+
+        if (receiverQuote) {
+          console.log(`Best receiver quote: ${receiverQuote.amountOut.toString()} from router type ${receiverQuote.swapType}`);
+        } else {
+          console.log(`No valid receiver quote found, using default parameters`);
         }
+      }
+
+      // Use the best quotes when available, only fall back to defaults if no quotes found
+      const sParamsToRepayLoan = repayQuote || {
+        swapType: SwapType.UNISWAP_V2,
+        router: this.config.contracts.punch.router,
+        path: utils.defaultAbiCoder.encode(["address[]"], [[collateralAsset, debtAsset]]),
+        amountIn: collateralAmount,
+        amountOutMin: 0,
+        adapters: []
       };
+
+      const sParamsToSendToReceiver = receiverQuote || {
+        swapType: SwapType.UNISWAP_V2,
+        router: this.config.contracts.punch.router,
+        path: utils.defaultAbiCoder.encode(["address[]"], [[debtAsset, wflowAddress]]),
+        amountIn: debtAmountForReceiver,
+        amountOutMin: 0,
+        adapters: []
+      };
+
+      const result = {
+        sParamsToRepayLoan,
+        sParamsToSendToReceiver
+      };
+
+      // Log which routers were actually selected
+      const routerNames = ['V2 (Punch)', 'V3 (Trado)', 'AgroKitty'];
+      console.log(`\n🎯 Selected Routers:`);
+      console.log(`  Repay Loan: ${routerNames[sParamsToRepayLoan.swapType]} (${sParamsToRepayLoan.router})`);
+      console.log(`  Send to Receiver: ${routerNames[sParamsToSendToReceiver.swapType]} (${sParamsToSendToReceiver.router})`);
 
       console.log(`\n=== Final Swap Parameters ===`);
       console.log(`Repay Loan Swap:`, result.sParamsToRepayLoan);

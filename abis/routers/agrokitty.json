@@ -67,9 +67,14 @@
       {
         "components": [
           {
-            "internalType": "uint256",
-            "name": "amountOut",
-            "type": "uint256"
+            "internalType": "uint256[]",
+            "name": "amounts",
+            "type": "uint256[]"
+          },
+          {
+            "internalType": "address[]",
+            "name": "adapters",
+            "type": "address[]"
           },
           {
             "internalType": "address[]",
@@ -77,9 +82,9 @@
             "type": "address[]"
           },
           {
-            "internalType": "address[]",
-            "name": "adapters",
-            "type": "address[]"
+            "internalType": "uint256",
+            "name": "gasEstimate",
+            "type": "uint256"
           }
         ],
         "internalType": "struct FormattedOffer",
