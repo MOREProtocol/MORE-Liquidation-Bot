@@ -221,7 +221,7 @@ async function main() {
   const liquidator = new Wallet(config.liquidator_key, provider);
 
   for (const unhealthyUser of unhealthyUsers) {
-    if (unhealthyUser.user !== '0x0000000000000000000000025d1c2e8ccf92bbc1') { /////////////////// MICHAEL
+    if (unhealthyUser.user !== '0x000000000000000000000002ddf7e0d50702b49d') { /////////////////// MICHAEL
       continue;
     }
     // Get the bot contract address for this specific pool
@@ -324,7 +324,7 @@ async function main() {
 
     // If user has both collateral and debt, proceed to liquidation
     if (mInfos.length > 0 && dInfos.length > 0) {
-      collateralAsset = mInfos[1].token[0];
+      collateralAsset = mInfos[0].token[0]; /////////////////// MICHAEL
       debtAsset = dInfos[0].token[0];
 
       const debtContract = new Contract(debtAsset, MTokenAbi, provider);
@@ -362,7 +362,7 @@ async function main() {
           collateralAsset,
           debtAsset,
           // collateralBal,
-          BigNumber.from('82220956283470462572353'), /////////////////// MICHAEL
+          BigNumber.from('119076547396620234564461'), /////////////////// MICHAEL
           config.contracts.wflow
         );
 
@@ -384,6 +384,7 @@ async function main() {
         console.log('sParamsToRepayLoan:', formatHexToDecimal(sParamsToRepayLoan));
         console.log('sParamsToSendToReceiver:', formatHexToDecimal(sParamsToSendToReceiver));
         console.log('receiver:', receiver);
+        // TODO: add divide by 2 recursivelly
         try {
           const tx = await botContract
             .connect(liquidator)
