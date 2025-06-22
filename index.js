@@ -49,6 +49,52 @@ const apolloFetcher = async (query) => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Recursive function to convert hex values to decimals for better readability
+function formatHexToDecimal(obj) {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+
+  // Handle BigNumber objects
+  if (obj && typeof obj === 'object' && obj._hex) {
+    return obj.toString();
+  }
+
+  // Handle arrays
+  if (Array.isArray(obj)) {
+    return obj.map(item => formatHexToDecimal(item));
+  }
+
+  // Handle objects
+  if (typeof obj === 'object') {
+    const formatted = {};
+    for (const [key, value] of Object.entries(obj)) {
+      // Skip formatting the "path" key as it contains addresses
+      if (key === 'path') {
+        formatted[key] = value;
+      } else {
+        formatted[key] = formatHexToDecimal(value);
+      }
+    }
+    return formatted;
+  }
+
+  // Handle hex strings that look like numbers (0x...)
+  if (typeof obj === 'string' && obj.startsWith('0x') && obj.length > 2) {
+    try {
+      const decimal = BigNumber.from(obj).toString();
+      // Only convert if it's actually a number (not an address)
+      if (obj.length > 42) { // Addresses are 42 chars, longer hex strings are likely numbers
+        return decimal;
+      }
+    } catch (e) {
+      // If conversion fails, return original
+    }
+  }
+
+  return obj;
+}
+
 async function main() {
   // 1. fetch users with AccountData
   let allUsers = [];
@@ -175,6 +221,9 @@ async function main() {
   const liquidator = new Wallet(config.liquidator_key, provider);
 
   for (const unhealthyUser of unhealthyUsers) {
+    if (unhealthyUser.user !== '0x0000000000000000000000025d1c2e8ccf92bbc1') { /////////////////// MICHAEL
+      continue;
+    }
     // Get the bot contract address for this specific pool
     const botContractAddress = config.bots[unhealthyUser.pool].bot;
     const routerQuoteManager = new RouterQuoteManager(provider, config, liquidator.address, botContractAddress);
@@ -270,10 +319,12 @@ async function main() {
         }
       }
     }
+    // TODO: rank tokens by amount of USD value. get USSD price
+    console.log('mInfos', mInfos);
 
     // If user has both collateral and debt, proceed to liquidation
     if (mInfos.length > 0 && dInfos.length > 0) {
-      collateralAsset = mInfos[0].token[0];
+      collateralAsset = mInfos[1].token[0];
       debtAsset = dInfos[0].token[0];
 
       const debtContract = new Contract(debtAsset, MTokenAbi, provider);
@@ -287,6 +338,7 @@ async function main() {
           debtMToken.mtoken
         );
         const increasedDebtBal = dInfos[0].amount
+        const collateralBal = mInfos[0].amount
         // If user's debt is more than available, cap it to available
         const checkedBal = increasedDebtBal.gt(debtBalanceInmToken)
           ? debtBalanceInmToken
@@ -304,12 +356,13 @@ async function main() {
 
         // Get best quotes for both swaps using the router quote manager
         console.log(`Getting best swap routes for liquidation...`);
-        console.log(`Collateral: ${collateralAsset}, Debt: ${debtAsset}, Amount: ${checkedBal.toString()}`);
+        console.log(`Collateral: ${collateralAsset}, Debt: ${debtAsset}, Amount: ${checkedBal.toString()}, Collateral Bal: ${collateralBal.toString()}`);
 
         const swapParams = await routerQuoteManager.getLiquidationSwapParams(
           collateralAsset,
           debtAsset,
-          checkedBal,
+          // collateralBal,
+          BigNumber.from('82220956283470462572353'), /////////////////// MICHAEL
           config.contracts.wflow
         );
 
@@ -324,15 +377,19 @@ async function main() {
 
         const sParamsToRepayLoan = swapParams.sParamsToRepayLoan;
         const sParamsToSendToReceiver = swapParams.sParamsToSendToReceiver;
-        const receiver = liquidator.address;
+        const receiver = "0x55203706a5EdCb1C8A6cc6e273FcB4b49dbe8FD5" // liquidator.address;
 
-        console.log(lParam, sParamsToRepayLoan, sParamsToSendToReceiver, receiver);
+        console.log('Formatted liquidation parameters:');
+        console.log('lParam:', formatHexToDecimal(lParam));
+        console.log('sParamsToRepayLoan:', formatHexToDecimal(sParamsToRepayLoan));
+        console.log('sParamsToSendToReceiver:', formatHexToDecimal(sParamsToSendToReceiver));
+        console.log('receiver:', receiver);
         try {
-          // const tx = await botContract
-          //   .connect(liquidator)
-          //   .execute(lParam, sParamsToRepayLoan, sParamsToSendToReceiver, receiver);
-          // const txReceipt = await tx.wait();
-          // console.log('txReceipt', txReceipt);
+          const tx = await botContract
+            .connect(liquidator)
+            .execute(lParam, sParamsToRepayLoan, sParamsToSendToReceiver, receiver);
+          const txReceipt = await tx.wait();
+          console.log('txReceipt', txReceipt);
           // try {
           //   const bot = new Telegraf(config.bot_token);
           //   await bot.telegram.sendMessage(

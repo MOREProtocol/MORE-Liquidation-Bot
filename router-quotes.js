@@ -6,6 +6,52 @@ const V3QuoterAbi = require("./abis/routers/v3.json");
 const AgroKittyRouterAbi = require("./abis/routers/agrokitty.json");
 const ERC20Abi = require("./abis/ERC20Abi.json");
 
+// Recursive function to convert hex values to decimals for better readability
+function formatHexToDecimal(obj) {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+
+  // Handle BigNumber objects
+  if (obj && typeof obj === 'object' && obj._hex) {
+    return obj.toString();
+  }
+
+  // Handle arrays
+  if (Array.isArray(obj)) {
+    return obj.map(item => formatHexToDecimal(item));
+  }
+
+  // Handle objects
+  if (typeof obj === 'object') {
+    const formatted = {};
+    for (const [key, value] of Object.entries(obj)) {
+      // Skip formatting the "path" key as it contains addresses
+      if (key === 'path') {
+        formatted[key] = value;
+      } else {
+        formatted[key] = formatHexToDecimal(value);
+      }
+    }
+    return formatted;
+  }
+
+  // Handle hex strings that look like numbers (0x...)
+  if (typeof obj === 'string' && obj.startsWith('0x') && obj.length > 2) {
+    try {
+      const decimal = BigNumber.from(obj).toString();
+      // Only convert if it's actually a number (not an address)
+      if (obj.length > 42) { // Addresses are 42 chars, longer hex strings are likely numbers
+        return decimal;
+      }
+    } catch (e) {
+      // If conversion fails, return original
+    }
+  }
+
+  return obj;
+}
+
 // Swap types enum to match the contract
 const SwapType = {
   UNISWAP_V2: 0,
@@ -163,7 +209,6 @@ class RouterQuoteManager {
  * Get quote from AgroKitty router
  */
   async getAgroKittyQuote(tokenIn, tokenOut, amountIn, adapters = []) {
-    console.log("+++++ ", tokenIn, tokenOut, amountIn.toString())
     try {
       // AgroKitty uses a custom Trade struct for swaps
       const trade = {
@@ -182,9 +227,13 @@ class RouterQuoteManager {
           tokenOut,
           maxSteps
         );
+        console.log('tokenIn', tokenIn);
+        console.log('tokenOut', tokenOut);
+        console.log('amountIn', amountIn.toString());
+        console.log('formattedOffer', formatHexToDecimal(formattedOffer));
 
         // Use the updated FormattedOffer structure: { amounts[], adapters[], path[], gasEstimate }
-        const amounts = formattedOffer.amounts || [];
+        const amounts = formattedOffer.amounts || formattedOffer[0] || [];
         const amountOut = amounts.length > 0 ? amounts[amounts.length - 1] : null; // Last amount is final output
         const bestPath = formattedOffer.path || [tokenIn, tokenOut];
         const bestAdapters = formattedOffer.adapters || [];
@@ -198,20 +247,20 @@ class RouterQuoteManager {
         console.log(`    Gas Estimate: ${gasEstimate.toString()}`);
 
         // Validate the amount - if it's suspiciously small compared to input, it might be an error
-        const minExpectedOut = amountIn.div(1000); // At least 0.1% of input seems reasonable
+        // const minExpectedOut = amountIn.div(1000); // At least 0.1% of input seems reasonable
 
         if (amountOut && amountOut.gt(0)) {
-          if (amountOut.lt(minExpectedOut)) {
-            console.log(`    ⚠️  Amount too small (${amountOut.toString()}) vs input (${amountIn.toString()}) - likely no valid path`);
-            // Return null instead of this tiny amount
-            return null;
-          }
+          // if (amountOut.lt(minExpectedOut)) {
+          //   console.log(`    ⚠️  Amount too small (${amountOut.toString()}) vs input (${amountIn.toString()}) - likely no valid path`);
+          //   // Return null instead of this tiny amount
+          //   return null;
+          // }
           return {
             swapType: SwapType.AGRO_KITTY,
             router: this.config.contracts.agrokitty.router,
             path: utils.defaultAbiCoder.encode(["address[]"], [bestPath]),
             amountIn: amountIn,
-            amountOut: amountOut,
+            // amountOut: amountOut,
             amountOutMin: amountOut.mul(990).div(1000), // 1% slippage for AgroKitty
             adapters: bestAdapters
           };
@@ -225,19 +274,6 @@ class RouterQuoteManager {
         console.log(`  Amount In: ${amountIn.toString()}`);
         console.log("  Using fallback estimation instead");
       }
-
-      // Method 2: Fallback to conservative estimate
-      const estimatedOut = amountIn.mul(96).div(100); // Conservative 4% spread estimate
-
-      return {
-        swapType: SwapType.AGRO_KITTY,
-        router: this.config.contracts.agrokitty.router,
-        path: utils.defaultAbiCoder.encode(["address[]"], [[tokenIn, tokenOut]]),
-        amountIn: amountIn,
-        amountOut: estimatedOut,
-        amountOutMin: estimatedOut.mul(990).div(1000), // 1% slippage for AgroKitty
-        adapters: []
-      };
     } catch (error) {
       console.error(`AgroKitty Router Quote Error (${this.config.contracts.agrokitty.router}):`);
       console.error(`  Error: ${error.message}`);
@@ -256,20 +292,26 @@ class RouterQuoteManager {
     console.log(`\n--- Getting quotes for ${amountIn.toString()} ${tokenIn} -> ${tokenOut} ---`);
 
     // Get quotes from all routers in parallel
-    const [v2Quote, v3Quote, agroKittyQuote] = await Promise.all([
-      this.getV2Quote(tokenIn, tokenOut, amountIn),
-      this.getV3Quote(tokenIn, tokenOut, amountIn),
+    // const [v2Quote, v3Quote, agroKittyQuote] = await Promise.all([
+    //   this.getV2Quote(tokenIn, tokenOut, amountIn),
+    //   this.getV3Quote(tokenIn, tokenOut, amountIn),
+    //   this.getAgroKittyQuote(tokenIn, tokenOut, amountIn, [])
+    // ]);
+    const [agroKittyQuote] = await Promise.all([
+      // this.getV2Quote(tokenIn, tokenOut, amountIn),
+      // this.getV3Quote(tokenIn, tokenOut, amountIn),
       this.getAgroKittyQuote(tokenIn, tokenOut, amountIn, [])
     ]);
 
     // Log detailed results for each router
     console.log("Quote Results Summary:");
-    console.log(`  V2 (Punch): ${v2Quote ? v2Quote.amountOut.toString() : 'FAILED'}`);
-    console.log(`  V3 (Trado): ${v3Quote ? v3Quote.amountOut.toString() : 'FAILED'}`);
-    console.log(`  AgroKitty: ${agroKittyQuote ? agroKittyQuote.amountOut.toString() : 'FAILED'}`);
+    // console.log(`  V2 (Punch): ${v2Quote ? v2Quote.amountOutMin.toString() : 'FAILED'}`);
+    // console.log(`  V3 (Trado): ${v3Quote ? v3Quote.amountOutMin.toString() : 'FAILED'}`);
+    console.log(`  AgroKitty: ${agroKittyQuote ? agroKittyQuote.amountOutMin.toString() : 'FAILED'}`);
 
     // Filter out null quotes
-    const validQuotes = [v2Quote, v3Quote, agroKittyQuote].filter(quote => quote !== null);
+    const validQuotes = [agroKittyQuote].filter(quote => quote !== null);
+    // const validQuotes = [v2Quote, v3Quote, agroKittyQuote].filter(quote => quote !== null);
 
     if (validQuotes.length === 0) {
       console.log("❌ No valid quotes found from any router");
@@ -284,16 +326,17 @@ class RouterQuoteManager {
     });
 
     const bestQuote = validQuotes[0];
-    const routerNames = ['V2 (Punch)', 'V3 (Trado)', 'AgroKitty'];
-    console.log(`✅ Best quote: ${bestQuote.amountOut.toString()} from ${routerNames[bestQuote.swapType]}`);
+    // const routerNames = ['V2 (Punch)', 'V3 (Trado)', 'AgroKitty'];
+    const routerNames = ['AgroKitty'];
+    console.log(`✅ Best quote: ${bestQuote.amountOutMin.toString()} from ${routerNames[bestQuote.swapType]}`);
 
     // Show comparison with other quotes
     if (validQuotes.length > 1) {
       console.log("Other quotes for comparison:");
       validQuotes.slice(1).forEach((quote, index) => {
-        const improvement = bestQuote.amountOut.sub(quote.amountOut);
-        const improvementPct = improvement.mul(10000).div(quote.amountOut).toNumber() / 100;
-        console.log(`  ${routerNames[quote.swapType]}: ${quote.amountOut.toString()} (-${improvement.toString()}, -${improvementPct.toFixed(2)}%)`);
+        const improvement = bestQuote.amountOutMin.sub(quote.amountOutMin);
+        const improvementPct = improvement.mul(10000).div(quote.amountOutMin).toNumber() / 100;
+        console.log(`  ${routerNames[quote.swapType]}: ${quote.amountOutMin.toString()} (-${improvement.toString()}, -${improvementPct.toFixed(2)}%)`);
       });
     }
 
@@ -316,13 +359,13 @@ class RouterQuoteManager {
       const repayQuote = await this.getBestQuote(collateralAsset, debtAsset, collateralAmount);
 
       if (repayQuote) {
-        console.log(`Best repay quote: ${repayQuote.amountOut.toString()} from router type ${repayQuote.swapType}`);
+        console.log(`Best repay quote: ${repayQuote.amountOutMin.toString()} from router type ${repayQuote.swapType}`);
       } else {
         console.log(`No valid repay quote found, using default parameters`);
       }
 
       // Get quote for debt -> WFLOW (to send to receiver)
-      const debtAmountForReceiver = repayQuote ? repayQuote.amountOut : BigNumber.from(0);
+      const debtAmountForReceiver = repayQuote ? repayQuote.amountOutMin : BigNumber.from(0);
       console.log(`\n--- Getting quote for debt -> WFLOW (send to receiver) ---`);
       console.log(`Debt amount for receiver swap: ${debtAmountForReceiver.toString()}`);
 
@@ -339,7 +382,7 @@ class RouterQuoteManager {
           router: this.config.contracts.punch.router,
           path: utils.defaultAbiCoder.encode(["address[]"], [[debtAsset, wflowAddress]]),
           amountIn: debtAmountForReceiver,
-          amountOut: debtAmountForReceiver, // 1:1 ratio since same token
+          // amountOut: debtAmountForReceiver, // 1:1 ratio since same token
           amountOutMin: debtAmountForReceiver, // No slippage risk
           adapters: []
         };
@@ -349,7 +392,7 @@ class RouterQuoteManager {
           await this.getBestQuote(debtAsset, wflowAddress, debtAmountForReceiver) : null;
 
         if (receiverQuote) {
-          console.log(`Best receiver quote: ${receiverQuote.amountOut.toString()} from router type ${receiverQuote.swapType}`);
+          console.log(`Best receiver quote: ${receiverQuote.amountOutMin.toString()} from router type ${receiverQuote.swapType}`);
         } else {
           console.log(`No valid receiver quote found, using default parameters`);
         }
