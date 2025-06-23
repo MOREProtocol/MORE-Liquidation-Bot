@@ -20,6 +20,9 @@ const PoolAbi = require("./abis/Pool.json");
 const MTokenAbi = require("./abis/MToken.json");
 const MulticallAbi = require("./abis/MulticallAbi.json");
 const LiquidationAbi = require("./abis/Liquidation.json");
+const AddressesProviderAbi = require("./abis/AddressesProviderAbi.json");
+const PriceOracleAbi = require("./abis/PriceOracleAbi.json");
+const ERC20Abi = require("./abis/ERC20Abi.json");
 
 const provider = new providers.JsonRpcProvider(config.rpc_url);
 
@@ -93,6 +96,202 @@ function formatHexToDecimal(obj) {
   }
 
   return obj;
+}
+
+// Helper function to decode reserve configuration data to extract liquidation bonus
+function extractLiquidationBonus(configurationData) {
+  // Aave configuration data is packed into a single uint256
+  // Liquidation bonus is stored in bits 32-47 (16 bits)
+  const data = BigNumber.from(configurationData);
+  const liquidationBonus = data.shr(32).and(0xFFFF); // Extract bits 32-47
+  return liquidationBonus;
+}
+
+// Helper function to get the price oracle address from the pool
+async function getPriceOracleAddress(poolAddress) {
+  try {
+    const poolContract = new Contract(poolAddress, PoolAbi, provider);
+    const addressesProviderAddress = await poolContract.ADDRESSES_PROVIDER();
+    const addressesProviderContract = new Contract(addressesProviderAddress, AddressesProviderAbi, provider);
+    const priceOracleAddress = await addressesProviderContract.getPriceOracle();
+    return priceOracleAddress;
+  } catch (error) {
+    console.error(`Error fetching price oracle address from pool ${poolAddress}:`, error);
+    return null;
+  }
+}
+
+// Helper function to get asset price from the pool's price oracle
+async function getAssetPrice(assetAddress, poolAddress) {
+  try {
+    const priceOracleAddress = await getPriceOracleAddress(poolAddress);
+    if (!priceOracleAddress) {
+      throw new Error("Could not get price oracle address");
+    }
+
+    const priceOracleContract = new Contract(priceOracleAddress, PriceOracleAbi, provider);
+    const price = await priceOracleContract.getAssetPrice(assetAddress);
+    return price;
+  } catch (error) {
+    console.error(`Error fetching price for asset ${assetAddress}:`, error);
+    return BigNumber.from(0);
+  }
+}
+
+// Helper function to get token decimals
+async function getTokenDecimals(tokenAddress) {
+  try {
+    const tokenContract = new Contract(tokenAddress, ERC20Abi, provider);
+    const decimals = await tokenContract.decimals();
+    return decimals;
+  } catch (error) {
+    console.error(`Error fetching decimals for token ${tokenAddress}:`, error);
+    return 18; // Default to 18 decimals
+  }
+}
+
+// Helper function to check if asset can be used as collateral
+function extractUsageAsCollateralEnabled(configurationData) {
+  // usageAsCollateralEnabled is stored in bit 56 (1 bit)
+  const data = BigNumber.from(configurationData);
+  const usageAsCollateralEnabled = data.shr(56).and(0x1); // Extract bit 56
+  return usageAsCollateralEnabled.eq(1);
+}
+
+// Helper function to get reserve configuration data (liquidation bonus + collateral enabled)
+async function getReserveConfiguration(poolAddress, assetAddress) {
+  try {
+    const poolContract = new Contract(poolAddress, PoolAbi, provider);
+    const reserveData = await poolContract.getReserveData(assetAddress);
+    const liquidationBonus = extractLiquidationBonus(reserveData.configuration.data);
+    const usageAsCollateralEnabled = extractUsageAsCollateralEnabled(reserveData.configuration.data);
+    return {
+      liquidationBonus,
+      usageAsCollateralEnabled
+    };
+  } catch (error) {
+    console.error(`Error fetching reserve configuration for asset ${assetAddress}:`, error);
+    return {
+      liquidationBonus: BigNumber.from(0),
+      usageAsCollateralEnabled: false
+    };
+  }
+}
+
+// Helper function to get liquidation bonus for an asset from the pool
+async function getLiquidationBonus(poolAddress, assetAddress) {
+  const config = await getReserveConfiguration(poolAddress, assetAddress);
+  return config.liquidationBonus;
+}
+
+// Aave V3 liquidation constants (based on Aave documentation)
+const CLOSE_FACTOR_HF_THRESHOLD = utils.parseEther('0.95'); // 0.95e18
+const DEFAULT_LIQUIDATION_CLOSE_FACTOR = 5000; // 50% in basis points
+const MAX_LIQUIDATION_CLOSE_FACTOR = 10000; // 100% in basis points
+
+// Helper function to calculate debt to cover based on close factor and health factor
+function calculateDebtToCover(healthFactor, userDebtBalance) {
+  let closeFactor;
+
+  if (healthFactor.lt(CLOSE_FACTOR_HF_THRESHOLD)) {
+    // Health factor < 0.95: can liquidate up to 100% of debt
+    closeFactor = MAX_LIQUIDATION_CLOSE_FACTOR;
+    console.log(`Health factor ${utils.formatEther(healthFactor)} < 0.95: Using MAX close factor (100%)`);
+  } else {
+    // Health factor >= 0.95 but < 1: can liquidate up to 50% of debt
+    closeFactor = DEFAULT_LIQUIDATION_CLOSE_FACTOR;
+    console.log(`Health factor ${utils.formatEther(healthFactor)} >= 0.95: Using DEFAULT close factor (50%)`);
+  }
+
+  // Calculate maximum debt that can be covered
+  const maxDebtToCover = userDebtBalance.mul(closeFactor).div(10000);
+
+  console.log(`Close factor: ${closeFactor / 100}%`);
+  console.log(`User debt balance: ${userDebtBalance.toString()}`);
+  console.log(`Max debt to cover: ${maxDebtToCover.toString()}`);
+
+  return maxDebtToCover;
+}
+
+// Helper function to select the best collateral asset for liquidation
+async function selectBestCollateralAsset(poolAddress, mInfos) {
+  console.log('Evaluating collateral assets for liquidation...');
+
+  const collateralCandidates = [];
+  const oracleDecimals = 8; // Assuming 8 decimals for oracle prices
+
+  for (const mInfo of mInfos) {
+    const assetAddress = mInfo.token[0];
+    const assetBalance = mInfo.amount;
+
+    try {
+      // Get reserve configuration
+      const reserveConfig = await getReserveConfiguration(poolAddress, assetAddress);
+
+      // Skip if asset cannot be used as collateral
+      if (!reserveConfig.usageAsCollateralEnabled) {
+        console.log(`Asset ${assetAddress} cannot be used as collateral (usageAsCollateralEnabled = false)`);
+        continue;
+      }
+
+      // Get asset price and decimals
+      const [assetPrice, assetDecimals] = await Promise.all([
+        getAssetPrice(assetAddress, poolAddress),
+        getTokenDecimals(assetAddress)
+      ]);
+
+      // Calculate USD value of the asset balance
+      const assetValueUSD = assetPrice
+        .mul(assetBalance)
+        .div(BigNumber.from(10).pow(assetDecimals)) // Convert to token units
+        .div(BigNumber.from(10).pow(oracleDecimals)); // Convert price to USD
+
+      const assetValueUSDFormatted = utils.formatUnits(
+        assetPrice.mul(assetBalance).div(BigNumber.from(10).pow(assetDecimals)),
+        oracleDecimals
+      );
+
+      console.log(`Asset ${assetAddress}:`);
+      console.log(`  - Price: $${utils.formatUnits(assetPrice, oracleDecimals)}`);
+      console.log(`  - Balance: ${utils.formatUnits(assetBalance, assetDecimals)}`);
+      console.log(`  - USD Value: $${assetValueUSDFormatted}`);
+      console.log(`  - Liquidation Bonus: ${reserveConfig.liquidationBonus.toString()} basis points`);
+      console.log(`  - Can be used as collateral: ${reserveConfig.usageAsCollateralEnabled}`);
+
+      collateralCandidates.push({
+        address: assetAddress,
+        balance: assetBalance,
+        price: assetPrice,
+        decimals: assetDecimals,
+        valueUSD: assetValueUSD,
+        liquidationBonus: reserveConfig.liquidationBonus,
+        usageAsCollateralEnabled: reserveConfig.usageAsCollateralEnabled
+      });
+
+    } catch (error) {
+      console.error(`Error evaluating asset ${assetAddress}:`, error);
+      continue;
+    }
+  }
+
+  if (collateralCandidates.length === 0) {
+    console.log('No suitable collateral assets found!');
+    return null;
+  }
+
+  // Sort by USD value (descending) to get the most valuable collateral
+  collateralCandidates.sort((a, b) => {
+    if (a.valueUSD.gt(b.valueUSD)) return -1;
+    if (a.valueUSD.lt(b.valueUSD)) return 1;
+    return 0;
+  });
+
+  const bestCollateral = collateralCandidates[0];
+  console.log(`Selected best collateral asset: ${bestCollateral.address}`);
+  console.log(`  - USD Value: $${utils.formatUnits(bestCollateral.price.mul(bestCollateral.balance).div(BigNumber.from(10).pow(bestCollateral.decimals)), oracleDecimals)}`);
+  console.log(`  - Liquidation Bonus: ${bestCollateral.liquidationBonus.toString()} basis points`);
+
+  return bestCollateral;
 }
 
 async function main() {
@@ -220,10 +419,10 @@ async function main() {
   // 3. Fetch unhealthy users debt info and attempt liquidation
   const liquidator = new Wallet(config.liquidator_key, provider);
 
-  for (const unhealthyUser of unhealthyUsers) {
-    if (unhealthyUser.user !== '0x000000000000000000000002ddf7e0d50702b49d') { /////////////////// MICHAEL
-      continue;
-    }
+  for (const unhealthyUser of wideUnhealthyUsers) {
+    // if (unhealthyUser.user !== '0x000000000000000000000002ddf7e0d50702b49d') { /////////////////// MICHAEL
+    //   continue;
+    // }
     // Get the bot contract address for this specific pool
     const botContractAddress = config.bots[unhealthyUser.pool].bot;
     const routerQuoteManager = new RouterQuoteManager(provider, config, liquidator.address, botContractAddress);
@@ -324,8 +523,16 @@ async function main() {
 
     // If user has both collateral and debt, proceed to liquidation
     if (mInfos.length > 0 && dInfos.length > 0) {
-      collateralAsset = mInfos[0].token[0]; /////////////////// MICHAEL
-      debtAsset = dInfos[0].token[0];
+      // Select the best collateral asset (highest value + usageAsCollateralEnabled)
+      const bestCollateral = await selectBestCollateralAsset(unhealthyUser.pool, mInfos);
+
+      if (!bestCollateral) {
+        console.log('No suitable collateral assets found for user', unhealthyUser.user);
+        continue;
+      }
+
+      collateralAsset = bestCollateral.address;
+      debtAsset = dInfos[0].token[0]; // Still using first debt asset for now
 
       const debtContract = new Contract(debtAsset, MTokenAbi, provider);
       // Find the mToken contract for the debt asset
@@ -337,15 +544,30 @@ async function main() {
         const debtBalanceInmToken = await debtContract.balanceOf(
           debtMToken.mtoken
         );
-        const increasedDebtBal = dInfos[0].amount
-        const collateralBal = mInfos[0].amount
-        // If user's debt is more than available, cap it to available
-        const checkedBal = increasedDebtBal.gt(debtBalanceInmToken)
-          ? debtBalanceInmToken
-          : increasedDebtBal;
-        const cover = increasedDebtBal.gt(debtBalanceInmToken)
-          ? debtBalanceInmToken
-          : constants.MaxUint256;
+        const userDebtBalance = dInfos[0].amount;
+        const collateralBal = bestCollateral.balance;
+
+        // https://aave.com/docs/developers/liquidations#executing-the-liquidation-call
+        // Calculate debt to cover based on close factor and health factor
+        const maxDebtToCoverByCloseFactor = calculateDebtToCover(unhealthyUser.healthFactor, userDebtBalance);
+
+        // The actual debt to cover is limited by:
+        // 1. Close factor limitation
+        // 2. Available debt tokens in the mToken contract
+        const checkedBal = BigNumber.min(
+          maxDebtToCoverByCloseFactor,
+          debtBalanceInmToken
+        );
+
+        // Set cover parameter: use calculated amount or let protocol handle max
+        const cover = checkedBal.eq(maxDebtToCoverByCloseFactor)
+          ? constants.MaxUint256  // Let protocol handle the close factor
+          : checkedBal;           // Use our calculated limited amount
+
+        console.log(`User debt balance: ${userDebtBalance.toString()}`);
+        console.log(`Max debt by close factor: ${maxDebtToCoverByCloseFactor.toString()}`);
+        console.log(`Available debt in mToken: ${debtBalanceInmToken.toString()}`);
+        console.log(`Final debt to cover: ${checkedBal.toString()}`);
 
         // Prepare liquidation parameters and call the liquidation contract
         const botContract = new Contract(
@@ -358,11 +580,84 @@ async function main() {
         console.log(`Getting best swap routes for liquidation...`);
         console.log(`Collateral: ${collateralAsset}, Debt: ${debtAsset}, Amount: ${checkedBal.toString()}, Collateral Bal: ${collateralBal.toString()}`);
 
+        // Use the data we already fetched from bestCollateral selection
+        const liquidationBonus = bestCollateral.liquidationBonus;
+        const collateralPrice = bestCollateral.price;
+        const collateralDecimals = bestCollateral.decimals;
+
+        console.log("Liquidation Bonus:", liquidationBonus.toString());
+
+        // Get debt asset price and decimals
+        const debtAssetPrice = await getAssetPrice(debtAsset, unhealthyUser.pool);
+        const debtDecimals = await getTokenDecimals(debtAsset);
+
+        console.log("Collateral Price:", collateralPrice.toString());
+        console.log("Debt Asset Price:", debtAssetPrice.toString());
+        console.log("Collateral Decimals:", collateralDecimals);
+        console.log("Debt Decimals:", debtDecimals);
+
+        // https://aave.com/docs/developers/liquidations#executing-the-liquidation-call
+        // maxAmountOfCollateralToLiquidate = (debtAssetPrice * debtToCover * liquidationBonus) / collateralPrice
+        // Note: liquidationBonus is stored as basis points (e.g., 10500 = 105% = 5% bonus)
+        // Oracle prices are typically in 8 decimals (USD price with 8 decimal places)
+
+        const debtToCover = cover.eq(constants.MaxUint256) ? checkedBal : cover;
+
+        // Calculate with proper decimal handling
+        // The formula needs to account for:
+        // 1. debtToCover is in debt token units (with debtDecimals)
+        // 2. Prices are in oracle decimals (usually 8 for USD prices)
+        // 3. Result should be in collateral token units (with collateralDecimals)
+        // 4. liquidationBonus is in basis points (10000 = 100%)
+
+        // Assuming oracle prices are in 8 decimals (typical for USD prices)
+        const oracleDecimals = 8;
+
+        // Formula: maxCollateral = (debtPrice * debtToCover * liquidationBonus) / (collateralPrice * 10000)
+        // But we need to adjust for decimal differences:
+        // - debtPrice is in oracleDecimals
+        // - debtToCover is in debtDecimals 
+        // - collateralPrice is in oracleDecimals
+        // - Result should be in collateralDecimals
+
+        const maxAmountOfCollateralToLiquidate = debtAssetPrice
+          .mul(debtToCover)
+          .mul(liquidationBonus)
+          .div(collateralPrice)
+          .div(10000)
+          // Adjust for decimal differences: we need to convert from debt token decimals to collateral token decimals
+          .mul(BigNumber.from(10).pow(collateralDecimals))
+          .div(BigNumber.from(10).pow(debtDecimals));
+
+        console.log("Max Amount of Collateral to Liquidate:", maxAmountOfCollateralToLiquidate.toString());
+        console.log("Debt to Cover:", debtToCover.toString());
+        console.log("Liquidation Bonus (basis points):", liquidationBonus.toString());
+
+        // Add human-readable versions for debugging
+        const collateralPriceFormatted = utils.formatUnits(collateralPrice, oracleDecimals);
+        const debtPriceFormatted = utils.formatUnits(debtAssetPrice, oracleDecimals);
+        const debtToCoverFormatted = utils.formatUnits(debtToCover, debtDecimals);
+        const maxCollateralFormatted = utils.formatUnits(maxAmountOfCollateralToLiquidate, collateralDecimals);
+
+        console.log("Formatted Collateral Price (USD): $" + collateralPriceFormatted);
+        console.log("Formatted Debt Price (USD): $" + debtPriceFormatted);
+        console.log("Formatted Debt to Cover:", debtToCoverFormatted);
+        console.log("Formatted Max Collateral to Liquidate:", maxCollateralFormatted);
+
+        // Verify the calculation makes sense
+        const debtValueUSD = parseFloat(debtPriceFormatted) * parseFloat(debtToCoverFormatted);
+        const collateralValueUSD = parseFloat(collateralPriceFormatted) * parseFloat(maxCollateralFormatted);
+        const liquidationBonusPercent = liquidationBonus.toNumber() / 100; // Convert basis points to percentage
+
+        console.log("Debt Value (USD):", debtValueUSD.toFixed(2));
+        console.log("Collateral Value (USD):", collateralValueUSD.toFixed(2));
+        console.log("Liquidation Bonus (%):", liquidationBonusPercent + "%");
+        console.log("Expected Collateral Value with Bonus (USD):", (debtValueUSD * liquidationBonusPercent / 100).toFixed(2));
+
         const swapParams = await routerQuoteManager.getLiquidationSwapParams(
           collateralAsset,
           debtAsset,
-          // collateralBal,
-          BigNumber.from('119076547396620234564461'), /////////////////// MICHAEL
+          maxAmountOfCollateralToLiquidate,
           config.contracts.wflow
         );
 
@@ -386,11 +681,11 @@ async function main() {
         console.log('receiver:', receiver);
         // TODO: add divide by 2 recursivelly
         try {
-          const tx = await botContract
-            .connect(liquidator)
-            .execute(lParam, sParamsToRepayLoan, sParamsToSendToReceiver, receiver);
-          const txReceipt = await tx.wait();
-          console.log('txReceipt', txReceipt);
+          // const tx = await botContract
+          //   .connect(liquidator)
+          //   .execute(lParam, sParamsToRepayLoan, sParamsToSendToReceiver, receiver);
+          // const txReceipt = await tx.wait();
+          // console.log('txReceipt', txReceipt);
           // try {
           //   const bot = new Telegraf(config.bot_token);
           //   await bot.telegram.sendMessage(
