@@ -419,10 +419,7 @@ async function main() {
   // 3. Fetch unhealthy users debt info and attempt liquidation
   const liquidator = new Wallet(config.liquidator_key, provider);
 
-  for (const unhealthyUser of wideUnhealthyUsers) {
-    // if (unhealthyUser.user !== '0x000000000000000000000002ddf7e0d50702b49d') { /////////////////// MICHAEL
-    //   continue;
-    // }
+  for (const unhealthyUser of unhealthyUsers) {
     // Get the bot contract address for this specific pool
     const botContractAddress = config.bots[unhealthyUser.pool].bot;
     const routerQuoteManager = new RouterQuoteManager(provider, config, liquidator.address, botContractAddress);
